@@ -200,7 +200,7 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5M21 12H9"/></svg>
       CHECK OUT</button>
   </div>
-  <div class="alert">📸 <span>Please take a selfie for both <b>Check In</b> and <b>Check Out</b>. Attendance can only be marked within the <b>office premises</b>. Your selfie is verified against your registered face, and your location and time are recorded automatically.</span></div>
+  <div class="alert">📸 <span>Please take a selfie for both <b>Check In</b> and <b>Check Out</b>. Attendance can only be marked within the <b>office premises</b><span id="officeAddr"></span>. Your selfie is verified against your registered face, and your location and time are recorded automatically.</span></div>
   <div id="mainMsg" class="msg"></div>
   <div class="foot">© Metro Max · Signage | Cutting</div>
 </div>
@@ -228,7 +228,7 @@
   /* =====================================================
      CONFIG – Paste your Apps Script Web App URL below
      ===================================================== */
-  var API_URL   = 'https://script.google.com/macros/s/AKfycbyqzdN-3RybWtqcGQOPiVcO1Qj96l4ux5nDrpHzRWhCBPp2DAxUmuzegAwZRDk8y72Z/exec';
+  var API_URL   = 'https://script.google.com/macros/s/AKfycbyXozjrRN9mJ1gyysjizatkvUrlQ88GEdRGJjtdOKnZOcWfohxfCVR9oo3LFGYwAYFJ/exec';
   var MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.15/model/';
   var LIVENESS  = true;   // true = head-turn check on every face capture (blocks printed photos)
 
@@ -373,7 +373,7 @@
   function afterLogin(r) {
     if (r.token) { TOKEN = r.token; store('mm_att_token', r.token); }
     USER = r.user;
-    if (r.office) OFFICE = r.office;
+    if (r.office) { OFFICE = r.office; $('officeAddr').textContent = OFFICE.address ? ' (' + OFFICE.address + ')' : ''; }
     document.querySelectorAll('.js-first').forEach(function (e) { e.textContent = USER.name.split(' ')[0]; });
     $('fullName').textContent = USER.name;
     $('uDesig').textContent = USER.designation || '-';
@@ -639,7 +639,7 @@
       return 'Your GPS signal is weak (accuracy ±' + p.acc + ' m). Please turn on high-accuracy location, move near a window or an open area, and try again.';
     var d = officeDistance(p);
     if (d !== null && d > OFFICE.radius)
-      return 'You are outside the office premises (' + d + ' m away). Attendance can only be marked within ' + OFFICE.radius + ' m of the office. Please stay within the office premises.';
+      return 'You are outside the office premises (' + d + ' m away from ' + (OFFICE.name || 'the office') + (OFFICE.address ? ', ' + OFFICE.address : '') + '). Attendance can only be marked within ' + OFFICE.radius + ' m of the office. Please stay within the office premises.';
     return '';
   }
 
