@@ -221,6 +221,7 @@
       <div><small>Department</small><b id="uDept"></b></div>
       <div class="wide"><small>Mobile</small><b id="uMob"></b></div>
     </div>
+    <button id="apprBtn" class="btn btn-admin hidden" style="background:#16a34a" onclick="openApprovals()">✅ My Approvals</button>
     <button id="adminBtn" class="btn btn-admin hidden" onclick="openAdmin()">🛠 Admin Panel</button>
   </div>
 
@@ -276,7 +277,7 @@
   /* =====================================================
      CONFIG – Paste your Apps Script Web App URL below
      ===================================================== */
-  var API_URL   = 'https://script.google.com/macros/s/AKfycbxnFp4gGiRjHQmzeu2mB3vEIcyBNKQGorPc1l5Ul2Yluls9-nIg1D8oJoXxo2ZotBSj/exec';
+  var API_URL   = 'https://script.google.com/macros/s/AKfycbw5bN0iNLGB4gcvrh1umy93jvY9XtNCfObyNOI0y3n5cAOKdpJ7h62z1Uw0PrcGpm4d/exec';
   var MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.15/model/';
   var LIVENESS  = true;   // true = head-turn check on every face capture (blocks printed photos)
 
@@ -443,9 +444,18 @@
     TOKEN = null; store('mm_att_token', null); show('loginView');
     msg('loginMsg', 'Your session has expired or your password was changed. Please log in again.');
   }
+  // Location error; "OUTSIDE|" errors get a button to request Outside Location approval
+  function locationMsg(t) {
+    if (String(t).indexOf('OUTSIDE|') === 0) {
+      return msg('mainMsg', '📍 ' + esc(t.replace('OUTSIDE|', '')) +
+        '<br><button class="btn btn-leave" style="margin:10px 0 0;padding:11px;font-size:14px" onclick="openLeave(\'Outside Location\')">📍 Request Outside Location Approval</button>');
+    }
+    msg('mainMsg', '📍 ' + esc(t));
+  }
   function handleErr(e, box) {
     var t = errText(e);
     if (t.indexOf('SESSION_EXPIRED') > -1) return sessionExpired();
+    if (t.indexOf('OUTSIDE|') === 0 && box === 'mainMsg') return locationMsg(t);
     if (t.indexOf('NEED_APPROVAL|') === 0) {
       msg(box, esc(t.replace('NEED_APPROVAL|', '')));
       return api('state', { token: TOKEN }).then(function (r) { applyState(r); if (DAY.needApproval && !DAY.pending) openLateForm(); }).catch(function () {});
@@ -682,16 +692,18 @@
   function showGps() {
     var d = officeDistance(POS);
     $('gps').textContent = '📍 ' + POS.lat.toFixed(6) + ', ' + POS.lng.toFixed(6) + ' (±' + POS.acc + ' m)' +
-      (d === null ? '' : (d <= OFFICE.radius ? '  •  Inside office premises (' + d + ' m)' : '  •  Outside office premises (' + d + ' m)'));
+      (d === null ? '' : (d <= OFFICE.radius ? '  •  Inside office premises (' + d + ' m)' : outsideAllowed() ? '  •  Outside location allowed (' + d + ' m)' : '  •  Outside office premises (' + d + ' m)'));
   }
   // Returns an error message if the location is not acceptable, otherwise ''
+  function outsideAllowed() { return !!(DAY && DAY.outside && (TYPE === 'OUT' ? DAY.outside.out : DAY.outside.in)); }
   function locationProblem(p) {
     if (!p) return POS_ERR || 'Unable to fetch your location. Please turn on GPS and try again.';
+    if (outsideAllowed()) return '';
     if (OFFICE && p.acc > OFFICE.maxAccuracy)
       return 'Your GPS signal is weak (accuracy ±' + p.acc + ' m). Please turn on high-accuracy location, move near a window or an open area, and try again.';
     var d = officeDistance(p);
     if (d !== null && d > OFFICE.radius)
-      return 'You are outside the office premises (' + d + ' m away from ' + (OFFICE.name || 'the office') + (OFFICE.address ? ', ' + OFFICE.address : '') + '). Attendance can only be marked within ' + OFFICE.radius + ' m of the office. Please stay within the office premises.';
+      return 'OUTSIDE|You are outside the office premises – ' + d + ' m away from ' + (OFFICE.name || 'the office') + (OFFICE.address ? ', ' + OFFICE.address : '') + '. Attendance can only be marked within ' + OFFICE.radius + ' m of the office. Please stay within the office premises.';
     return '';
   }
 
@@ -745,7 +757,7 @@
       var prob = locationProblem(p);
       if (prob) {
         loading(false); closeCam();
-        msg('mainMsg', '📍 ' + esc(prob));
+        locationMsg(prob);
         return;
       }
       loading(true, 'Saving attendance...');
@@ -764,7 +776,7 @@
   // ======================================================
   //  v5 – STATE, BANNERS, REQUESTS, ADMIN
   // ======================================================
-  var DAY = {}, APPROVERS = [], ISADMIN = false, ADM = null, ADM_TAB = 'req';
+  var DAY = {}, APPROVERS = [], ISADMIN = false, ISAPPROVER = false, PENDING_APPR = 0, ADM = null, ADM_TAB = 'req';
 
   function applyState(r) {
     if (!r) return;
@@ -774,6 +786,9 @@
     if (r.isAdmin !== undefined) ISADMIN = !!r.isAdmin;
     setToday(r.today);
     $('adminBtn').classList.toggle('hidden', !ISADMIN);
+    if (r.isApprover !== undefined) { ISAPPROVER = !!r.isApprover; PENDING_APPR = r.pendingApprovals || 0; }
+    $('apprBtn').classList.toggle('hidden', !ISAPPROVER);
+    $('apprBtn').textContent = '✅ My Approvals' + (PENDING_APPR ? '  •  ' + PENDING_APPR + ' Pending' : '');
     var b = $('banner'), bn = DAY.banner;
     if (!bn) { b.className = 'banner hidden'; b.innerHTML = ''; }
     else {
@@ -817,7 +832,7 @@
     getLocation().then(function (p) {
       loading(false);
       var prob = locationProblem(p);
-      if (prob) return msg('mainMsg', '📍 ' + esc(prob));
+      if (prob) return locationMsg(prob);
       return ensureModels().then(function () { runSelfie(); });
     }).catch(function (e) { loading(false); msg('mainMsg', esc(errText(e))); });
   }
@@ -867,13 +882,15 @@
 
   // ---------- leave / absent / half day form ----------
   function todayISO() { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date()); }
-  function openLeave() {
+  function openLeave(preType) {
     var t = todayISO();
     openModal('Leave / Half Day Request',
       '<div class="two"><div class="f"><label>Name</label><input readonly value="' + esc(USER.name) + '"></div>' +
       '<div class="f"><label>Department</label><input readonly value="' + esc(USER.department || '-') + '"></div></div>' +
       '<div class="f"><label>Request Type</label><select id="lvType" onchange="lvTypeChanged()">' +
-      '<option value="">– Select –</option><option>Leave</option><option>Absent</option><option>Half Day</option></select></div>' +
+      '<option value="">– Select –</option><option>Leave</option><option>Absent</option><option>Half Day</option><option>Outside Location</option></select></div>' +
+      '<div id="lvScope" class="f hidden"><label>Allow Attendance Outside Office For</label><select id="lvScopeSel">' +
+      '<option>Check In</option><option>Check Out</option><option selected>Check In & Check Out</option></select></div>' +
       '<div id="lvDates" class="two hidden"><div class="f"><label>From Date</label><input type="date" id="lvFrom" min="' + t + '" value="' + t + '"></div>' +
       '<div class="f"><label>To Date</label><input type="date" id="lvTo" min="' + t + '" value="' + t + '"></div></div>' +
       '<div id="lvHalf" class="hidden"><div class="f"><label>Date</label><input type="date" id="lvDate" min="' + t + '" value="' + t + '"></div>' +
@@ -884,13 +901,15 @@
       '<div id="lvMsg" class="msg"></div>' +
       '<button class="btn btn-brand" style="margin-top:14px" onclick="sendLeave()">Submit for Approval</button>' +
       '<div style="margin-top:20px"><b style="font-size:14px">My Recent Requests</b><div id="myReqs" class="note">Loading...</div></div>');
+    if (preType) { $('lvType').value = preType; lvTypeChanged(); }
     api('myRequests', { token: TOKEN }).then(function (r) {
       $('myReqs').innerHTML = r.requests.length ? r.requests.map(reqCard).join('') : 'No requests yet.';
     }).catch(function () { $('myReqs').textContent = ''; });
   }
   function lvTypeChanged() {
     var t = $('lvType').value;
-    $('lvDates').classList.toggle('hidden', !(t === 'Leave' || t === 'Absent'));
+    $('lvDates').classList.toggle('hidden', !(t === 'Leave' || t === 'Absent' || t === 'Outside Location'));
+    $('lvScope').classList.toggle('hidden', t !== 'Outside Location');
     $('lvHalf').classList.toggle('hidden', t !== 'Half Day');
   }
   function sendLeave() {
@@ -900,7 +919,7 @@
     if (!ap.length) return msg('lvMsg', 'Please select at least one person for approval.');
     var req = { token: TOKEN, type: type, reason: reason, approvers: ap };
     if (type === 'Half Day') { req.date = $('lvDate').value; req.fromTime = $('lvFt').value; req.toTime = $('lvTt').value; }
-    else { req.fromDate = $('lvFrom').value; req.toDate = $('lvTo').value; }
+    else { req.fromDate = $('lvFrom').value; req.toDate = $('lvTo').value; if (type === 'Outside Location') req.scope = $('lvScopeSel').value; }
     loading(true, 'Sending request...');
     api('leave', req).then(function (r) {
       closeModal(); applyState(r); msg('mainMsg', '✔ ' + esc(r.message), 'ok');
@@ -910,6 +929,7 @@
   function reqWhen(q) {
     if (q.type === 'Half Day') return fmtD(q.from) + ' • ' + q.fromT + ' to ' + q.toT;
     if (q.type === 'Late Check-In') return fmtD(q.from) + ' • ' + q.fromT;
+    if (q.type === 'Outside Location') return fmtD(q.from) + (q.to && q.to !== q.from ? ' to ' + fmtD(q.to) : '') + ' • ' + q.fromT;
     return fmtD(q.from) + (q.to && q.to !== q.from ? ' to ' + fmtD(q.to) : '') + ' (' + q.days + ' day' + (q.days > 1 ? 's' : '') + ')';
   }
   function reqCard(q, admin) {
@@ -918,8 +938,9 @@
       (admin ? '<small>' + esc(q.dept) + ' • ' + esc(q.type) + '</small><br>' : '') +
       '<small>' + esc(reqWhen(q)) + '</small><div style="margin-top:4px">' + esc(q.reason) + '</div>' +
       '<small>' + (q.decidedBy ? (q.status === 'Approved' ? 'Approved by ' : 'Decided by ') + esc(q.decidedBy) : 'Sent to ' + esc(q.sentTo)) + '</small>';
-    if (admin === true) h += '<div class="row-actions"><button class="b-yes" onclick="admDecide(\'' + q.id + '\',\'yes\')">✅ Approve</button>' +
-      '<button class="b-no" onclick="admDecide(\'' + q.id + '\',\'no\')">❌ Reject</button></div>';
+    var fn = admin === 'approver' ? 'apprDecide' : 'admDecide';
+    if (admin === true || (admin === 'approver' && q.status === 'Pending')) h += '<div class="row-actions"><button class="b-yes" onclick="' + fn + '(\'' + q.id + '\',\'yes\')">✅ YES – Approve</button>' +
+      '<button class="b-no" onclick="' + fn + '(\'' + q.id + '\',\'no\')">❌ NO – Reject</button></div>';
     return h + '</div>';
   }
 
@@ -964,14 +985,21 @@
       h += dateBox +
         '<div class="f"><label>Employee</label><select id="ovEmp"><option value="">– Select Employee –</option>' + empOpts + '</select></div>' +
         '<div class="f"><label>Action</label><select id="ovMode">' +
+        '<optgroup label="Outside office location">' +
+        '<option value="OUTSIDE_IN">📍 Outside Location – Check In only</option>' +
+        '<option value="OUTSIDE_OUT">📍 Outside Location – Check Out only</option>' +
+        '<option value="OUTSIDE_BOTH">📍 Outside Location – Check In & Check Out</option>' +
+        '<option value="OUTSIDE_OFF">🏢 Office Location only again</option></optgroup>' +
+        '<optgroup label="Check In / Check Out">' +
         '<option value="ALLOW_IN">✅ Activate Check In (ignore time / holiday / leave rules)</option>' +
         '<option value="ALLOW_OUT">✅ Activate Check Out (after 9:00 PM)</option>' +
         '<option value="BLOCK">⛔ Deactivate Check In & Check Out</option>' +
-        '<option value="CLEAR">↩ Remove all changes (back to normal rules)</option></select></div>' +
+        '<option value="CLEAR">↩ Remove all changes (back to normal rules)</option></optgroup></select></div>' +
+        '<div class="f"><label>Till Date (optional – for more than one day)</label><input type="date" id="ovTo" min="' + ADM.date + '"></div>' +
         '<div class="row-actions"><button class="b-save" onclick="admOverride()">Apply</button></div>' +
         '<div style="margin-top:16px"><b>Changes on this date</b></div>' +
         (ADM.overrides.length ? ADM.overrides.map(function (o) {
-          return '<div class="item"><div class="top"><b>' + esc(o.name) + '</b><span class="st Pending">' + esc(o.action) + '</span></div><small>by ' + esc(o.by) + ' at ' + esc(o.at) + '</small></div>';
+          return '<div class="item"><div class="top"><b>' + esc(o.name) + '</b><span class="st Pending">' + esc(OV_LABEL[o.action] || o.action) + '</span></div><small>by ' + esc(o.by) + ' at ' + esc(o.at) + '</small></div>';
         }).join('') : '<div class="note">No changes on this date.</div>');
     } else {
       h += '<div class="note" style="font-size:14px">Daily Summary and Monthly Salary refresh automatically every 30 minutes and whenever the Month / Year dropdown is changed in the sheet. Use this button to refresh them now.</div>' +
@@ -1002,8 +1030,34 @@
   }
   function admOverride() {
     if (!$('ovEmp').value) return msg('admMsg', 'Please select an employee.');
-    admCall('adminOverride', { empRow: $('ovEmp').value, mode: $('ovMode').value }, 'Done. The employee will see the change when they open the portal.');
+    admCall('adminOverride', { empRow: $('ovEmp').value, mode: $('ovMode').value, toDate: $('ovTo').value }, 'Done. The employee will see the change when they open the portal.');
   }
+  var OV_LABEL = { ALLOW_IN: 'Check In Activated', ALLOW_OUT: 'Check Out Activated', BLOCK: 'Check In / Out Deactivated', CLEAR: 'Back to Normal',
+    OUTSIDE_IN: 'Outside – Check In', OUTSIDE_OUT: 'Outside – Check Out', OUTSIDE_BOTH: 'Outside – In & Out', OUTSIDE_OFF: 'Office Location Only' };
+
+  // ---------- MY APPROVALS (people in the APPROVAL tab) ----------
+  function openApprovals() {
+    loading(true, 'Loading approvals...');
+    api('approverLoad', { token: TOKEN }).then(renderApprovals)
+      .catch(function (e) { handleErr(e, 'mainMsg'); }).finally(function () { loading(false); });
+  }
+  function renderApprovals(r) {
+    var pend = r.requests.filter(function (q) { return q.status === 'Pending'; });
+    var done = r.requests.filter(function (q) { return q.status !== 'Pending'; });
+    PENDING_APPR = pend.length;
+    $('apprBtn').textContent = '✅ My Approvals' + (PENDING_APPR ? '  •  ' + PENDING_APPR + ' Pending' : '');
+    openModal('✅ My Approvals',
+      '<b>Pending (' + pend.length + ')</b>' + (pend.length ? pend.map(function (q) { return reqCard(q, 'approver'); }).join('') : '<div class="note">No pending requests.</div>') +
+      (done.length ? '<div style="margin-top:14px"><b>Recent</b></div>' + done.map(function (q) { return reqCard(q, 'approver'); }).join('') : '') +
+      '<div id="apMsg" class="msg"></div>');
+  }
+  function apprDecide(id, d) {
+    loading(true, 'Saving...');
+    api('approverDecide', { token: TOKEN, id: id, decision: d }).then(function (r) {
+      renderApprovals(r); msg('apMsg', '✔ ' + (d === 'yes' ? 'Approved' : 'Rejected') + '. The employee has been informed on WhatsApp.', 'ok');
+    }).catch(function (e) { msg('apMsg', esc(errText(e))); }).finally(function () { loading(false); });
+  }
+
   function admReports() {
     loading(true, 'Refreshing reports...');
     api('adminReports', { token: TOKEN }).then(function (r) { msg('repMsg', '✔ ' + esc(r.message), 'ok'); })
