@@ -336,6 +336,13 @@
   }
 
   // ---------- face models ----------
+  var MODELS_READY = false;
+  // Waits for the face models while the camera is already showing (no full-screen loader)
+  function modelsWhileCamOpen() {
+    if (MODELS_READY) return Promise.resolve();
+    say('Loading face recognition...', '');
+    return loadModels();
+  }
   function loadModels() {
     if (MODELS) return MODELS;
     MODELS = (window.faceapi ? initBackend().then(function () { return Promise.all([
@@ -344,7 +351,7 @@
       faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
       faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL)
     ]); }) : Promise.reject(new Error('Face recognition library failed to load')))
-      .then(function () { $('modelStatus').className = 'status-line ok'; $('modelStatus').textContent = '✔ Face recognition ready'; })
+      .then(function () { MODELS_READY = true; $('modelStatus').className = 'status-line ok'; $('modelStatus').textContent = '✔ Face recognition ready'; })
       .catch(function (e) {
         MODELS = null;
         $('modelStatus').className = 'status-line bad'; $('modelStatus').textContent = '⚠ Face recognition failed to load. Please check your connection and refresh the page.';
@@ -431,11 +438,12 @@
     if (r.rules) RULES = r.rules;
     applyState(r);
     show(USER.faceRegistered ? 'mainView' : 'enrollView');
+    if (USER.faceRegistered) warmGps();
   }
 
   function doLogout() {
     api('logout', { token: TOKEN }).catch(function () {});
-    TOKEN = null; USER = null; store('mm_att_token', null); closeModal();
+    TOKEN = null; USER = null; store('mm_att_token', null); closeModal(); stopGps();
     msg('mainMsg', ''); msg('enrollMsg', ''); msg('loginMsg', '');
     show('loginView');
   }
@@ -476,7 +484,9 @@
   // ======================================================
   //  CAMERA
   // ======================================================
+  var CAM_SESSION = 0;
   function openCam(title) {
+    var my = ++CAM_SESSION;
     $('camTitle').textContent = title;
     $('cam').classList.remove('hidden');
     $('preview').classList.add('hidden'); $('video').classList.remove('hidden');
@@ -484,6 +494,10 @@
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return Promise.reject(new Error('NO_CAMERA'));
     return navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false })
       .then(function (s) {
+        if (my !== CAM_SESSION || $('cam').classList.contains('hidden')) {   // closed while starting
+          s.getTracks().forEach(function (t) { t.stop(); });
+          throw new Error('CANCELLED');
+        }
         STREAM = s;
         var v = $('video'); v.srcObject = s;
         try { s.getVideoTracks()[0].applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(function () {}); } catch (e) {}
@@ -502,6 +516,7 @@
   }
   function stopStream() { if (STREAM) { STREAM.getTracks().forEach(function (t) { t.stop(); }); STREAM = null; } }
   function closeCam() {
+    CAM_SESSION++;
     if (CAPTURE) { var c = CAPTURE; CAPTURE = null; c.reject(new Error('CANCELLED')); }
     stopStream(); PHOTO = null; DESC = null;
     $('cam').classList.add('hidden'); say('');
@@ -622,10 +637,9 @@
   function startScan(mode) {
     var box = mode === 'login' ? 'loginMsg' : 'enrollMsg';
     msg('loginMsg', ''); msg('enrollMsg', '');
-    ensureModels().then(function () {
-      setCamUI('scan');
-      return openCam(mode === 'login' ? 'Face Login' : 'Face Registration');
-    }).then(function () {
+    loadModels().catch(function () {});
+    setCamUI('scan');
+    openCam(mode === 'login' ? 'Face Login' : 'Face Registration').then(modelsWhileCamOpen).then(function () {
       return guidedCapture(mode === 'enroll' ? 5 : 3);
     }).then(function (r) {
       closeCam();
@@ -653,31 +667,42 @@
   //  CHECK IN / CHECK OUT
   // ======================================================
   // Best GPS reading within ~12 seconds (stops early once accuracy is 20 m or better)
+  // GPS is started as soon as the portal opens, so a fix is ready when Check In / Out is pressed
+  var GPS_WATCH = null, LIVE_POS = null, GPS_ERR = null;
+  function warmGps() {
+    if (GPS_WATCH !== null || !navigator.geolocation) return;
+    GPS_WATCH = navigator.geolocation.watchPosition(function (p) {
+      var c = { lat: p.coords.latitude, lng: p.coords.longitude, acc: Math.round(p.coords.accuracy), t: Date.now() };
+      if (!LIVE_POS || c.acc <= LIVE_POS.acc + 15 || Date.now() - LIVE_POS.t > 20000) LIVE_POS = c;
+      GPS_ERR = null;
+    }, function (err) {
+      GPS_ERR = err.code === 1 ? 'Location access was denied. Please allow location access in your browser settings and turn on GPS.'
+                               : 'Unable to fetch your location. Please turn on GPS and try again.';
+    }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 10000 });
+  }
+  function stopGps() { if (GPS_WATCH !== null) { navigator.geolocation.clearWatch(GPS_WATCH); GPS_WATCH = null; } }
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) stopGps(); else if (TOKEN && !$('mainView').classList.contains('hidden')) warmGps();
+  });
+
   function getLocation() {
     POS = null; POS_ERR = null;
-    $('gps').textContent = '📍 Fetching your location...';
+    warmGps();
     POS_PROMISE = new Promise(function (resolve) {
       if (!navigator.geolocation) { POS_ERR = 'Location is not supported on this browser.'; $('gps').textContent = '⚠ ' + POS_ERR; return resolve(null); }
-      var best = null, done = false, id = null, timer = null;
-      function finish() {
-        if (done) return; done = true;
-        if (id !== null) navigator.geolocation.clearWatch(id);
-        clearTimeout(timer);
-        POS = best;
-        if (best) showGps(); else $('gps').textContent = '⚠ ' + (POS_ERR || 'Location not available.');
-        resolve(best);
-      }
-      id = navigator.geolocation.watchPosition(function (p) {
-        var c = { lat: p.coords.latitude, lng: p.coords.longitude, acc: Math.round(p.coords.accuracy) };
-        if (!best || c.acc < best.acc) best = c;
-        $('gps').textContent = '📍 Improving GPS accuracy... (±' + best.acc + ' m)';
-        if (best.acc <= 20) finish();
-      }, function (err) {
-        POS_ERR = err.code === 1 ? 'Location access was denied. Please allow location access in your browser settings and turn on GPS.'
-                                 : 'Unable to fetch your location. Please turn on GPS and try again.';
-        if (err.code === 1) finish();
-      }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
-      timer = setTimeout(finish, 12000);
+      var started = Date.now();
+      (function check() {
+        var c = LIVE_POS, fresh = c && Date.now() - c.t < 30000;
+        if (fresh && (c.acc <= 30 || Date.now() - started > 6000)) { POS = c; showGps(); return resolve(c); }
+        if (GPS_ERR && /denied/.test(GPS_ERR)) { POS_ERR = GPS_ERR; $('gps').textContent = '⚠ ' + POS_ERR; return resolve(null); }
+        if (Date.now() - started > 15000) {
+          if (c) { POS = c; showGps(); return resolve(c); }
+          POS_ERR = GPS_ERR || 'Unable to fetch your location. Please turn on GPS and try again.';
+          $('gps').textContent = '⚠ ' + POS_ERR; return resolve(null);
+        }
+        $('gps').textContent = c ? '📍 Improving GPS accuracy... (±' + c.acc + ' m)' : '📍 Fetching your location...';
+        setTimeout(check, 250);
+      })();
     });
     return POS_PROMISE;
   }
@@ -713,7 +738,9 @@
     PHOTO = null; DESC = null;
     setCamUI('att');
     if (POS) showGps();
+    loadModels().catch(function () {});
     openCam(TYPE === 'IN' ? 'CHECK IN – Selfie' : 'CHECK OUT – Selfie')
+      .then(modelsWhileCamOpen)
       .then(function () { return guidedCapture(3); })
       .then(function (r) { stopStream(); showPreview(r); })
       .catch(function (e) {
@@ -808,33 +835,36 @@
 
   function startCapture(type) {
     TYPE = type; msg('mainMsg', '');
-    loading(true, 'Please wait...');
-    api('state', { token: TOKEN, attempt: type }).then(function (r) {
-      loading(false);
-      applyState(r);
-      if (type === 'IN' && !DAY.canIn) {
-        if (DAY.needApproval && !DAY.pending) openLateForm();
-        else if (DAY.banner) msg('mainMsg', esc(DAY.banner.text));
-        return;
-      }
-      if (type === 'OUT' && !DAY.canOut) { if (DAY.banner) msg('mainMsg', esc(DAY.banner.text)); return; }
-      if (type === 'OUT' && DAY.earlyOut) {
-        return confirmBox('Early Check Out', 'It is before ' + hm12(RULES.EARLY_OUT_BEFORE) + '. If you check out now, today will be marked as a <b>Half Day</b>. Do you want to continue?',
-          'Yes, Check Out', proceedCapture);
-      }
-      proceedCapture();
-    }).catch(function (e) { loading(false); handleErr(e, 'mainMsg'); });
+    // Instant decision from the last known state (refreshed every minute); the server re-checks anyway
+    if (type === 'IN' && !DAY.canIn && DAY.needApproval && !DAY.pending) return openLateForm();
+    if (type === 'OUT' && DAY.earlyOut) {
+      return confirmBox('Early Check Out', 'It is before ' + hm12(RULES.EARLY_OUT_BEFORE) + '. If you check out now, today will be marked as a <b>Half Day</b>. Do you want to continue?',
+        'Yes, Check Out', proceedCapture);
+    }
+    proceedCapture();
   }
 
   function proceedCapture() {
     closeModal();
-    loading(true, 'Checking your location...');
-    getLocation().then(function (p) {
-      loading(false);
-      var prob = locationProblem(p);
-      if (prob) return locationMsg(prob);
-      return ensureModels().then(function () { runSelfie(); });
-    }).catch(function (e) { loading(false); msg('mainMsg', esc(errText(e))); });
+    var type = TYPE, aborted = false;
+    function abort(fn) { if (aborted) return; aborted = true; closeCam(); fn(); }
+    // 1) camera + selfie start immediately
+    runSelfie();
+    // 2) GPS and today's rules are checked at the same time
+    var locP = getLocation();
+    var stP = api('state', { token: TOKEN, attempt: type }).then(function (r) { applyState(r); return true; })
+      .catch(function (e) { abort(function () { handleErr(e, 'mainMsg'); }); return false; });
+    stP.then(function (ok) {
+      if (!ok || aborted) return;
+      if (type === 'IN' && !DAY.canIn) return abort(function () {
+        if (DAY.needApproval && !DAY.pending) openLateForm(); else if (DAY.banner) msg('mainMsg', esc(DAY.banner.text));
+      });
+      if (type === 'OUT' && !DAY.canOut) return abort(function () { if (DAY.banner) msg('mainMsg', esc(DAY.banner.text)); });
+      return locP.then(function (p) {
+        var prob = locationProblem(p);
+        if (prob) abort(function () { locationMsg(prob); });
+      });
+    });
   }
 
   var RULES = { EARLY_OUT_BEFORE: '17:00' };
